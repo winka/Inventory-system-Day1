@@ -1,88 +1,150 @@
+// 1. 載入並讀取 .env 檔案裡的機密環境變數
+require('dotenv').config();
+
 const express = require('express');
 const app = express();
 const PORT = 3000;
 
-// 啟用 JSON 解析功能，這樣程式才能讀懂前端傳來的新麵粉資料
-app.use(express.json());
+// 2. 載入 pg 套件中的 Pool (連線池)
+const { Pool } = require('pg');
 
-// 我們的模擬麵粉倉庫 (記憶體資料庫)
-let inventory = [
-    { id: 1, name: '特級高筋麵粉', quantity: 50, unit: '袋' },
-    { id: 2, name: '中筋麵粉', quantity: 30, unit: '袋' }
-];
+// 3. 建立資料庫連線池
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL, // 自動去抓 .env 裡的密碼
+    ssl: {
+        rejectUnauthorized: false // 允許連線到雲端資料庫的安全設定
+    }
+});
+
+app.use(express.json());
 
 // ==========================================
 // 1. [GET] 取得所有麵粉庫存
 // ==========================================
-app.get('/api/inventory', (req, res) => {
-    res.status(200).json({
-        message: '成功取得庫存清單',
-        data: inventory
-    });
-});
+app.get('/api/inventory', async (req, res) => {
+    try {
+        // 派警衛 (pool) 去資料庫執行 SQL 查詢指令，並等待 (await) 結果回來
+        // ORDER BY id ASC 代表按照 ID 由小到大排序
+        const result = await pool.query('SELECT * FROM inventory ORDER BY id ASC');
+        
+        // 將拿到的資料打包回傳給前端
+        res.status(200).json({
+            message: '成功從 PostgreSQL 取得庫存清單！',
+            data: result.rows  // 🔑 關鍵：資料庫查到的陣列，會放在 result 的 rows 屬性裡
+        });
 
+    } catch (error) {
+        // 如果資料庫當機或 SQL 語法寫錯，就會跑到這裡
+        console.error('查詢資料庫失敗：', error);
+        res.status(500).json({ message: '伺服器內部發生錯誤' });
+    }
+});
 // ==========================================
 // 2. [POST] 新增一筆麵粉資料
 // ==========================================
-app.post('/api/inventory', (req, res) => {
-    const itemData = req.body; // 接收前端傳來的資料
-    
-    // 展開運算子：複製一份新資料，避免動到源頭
-    const newItem = { ...itemData };
-    
-    // 三元運算子：自動計算下一個不重複的 ID
-    newItem.id = inventory.length ? inventory[inventory.length - 1].id + 1 : 1;
-    
-    // 用 .push() 塞入倉庫最尾端
-    inventory.push(newItem);
+app.post('/api/inventory', async (req, res) => {
+    try {
+        // 1. 打開包裹，拿出裡面的麵粉資訊
+        const { name, quantity, unit } = req.body;
 
-    res.status(201).json({
-        message: '成功新增庫存項目',
-        data: newItem
-    });
+        // 2. 準備 SQL 新增語法 (注意 VALUES 裡面的 $1, $2, $3)
+        const insertQuery = `
+            INSERT INTO inventory (name, quantity, unit) 
+            VALUES ($1, $2, $3) 
+            RETURNING *;
+        `;
+        
+        // 3. 把實際要填入的資料打包成陣列
+        const values = [name, quantity, unit];
+
+        // 4. 派警衛把「語法」和「資料」分開帶去資料庫執行
+        const result = await pool.query(insertQuery, values);
+
+        // 5. 回傳成功訊息，並把資料庫剛剛建好的那筆資料印出來
+        res.status(201).json({
+            message: '成功將新麵粉存入資料庫！',
+            data: result.rows[0] 
+        });
+
+    } catch (error) {
+        console.error('新增資料失敗：', error);
+        res.status(500).json({ message: '伺服器內部發生錯誤' });
+    }
 });
 
 // ==========================================
 // 3. [PUT] 修改指定 ID 的麵粉資料
 // ==========================================
-app.put('/api/inventory/:id', (req, res) => {
-    const itemId = parseInt(req.params.id); // 取得網址上的 ID 數字
-    const updatedData = req.body;           // 取得要修改的內容
+app.put('/api/inventory/:id', async (req, res) => {
+    try {
+        const itemId = parseInt(req.params.id);
+        const { quantity } = req.body;
 
-    // 用 .findIndex() 找這包麵粉在倉庫的第幾個位置
-    const index = inventory.findIndex(item => item.id === itemId);
+        // 🔑 關鍵：使用 WHERE id = $2 鎖定目標，避免全表更新
+        const updateQuery = `
+            UPDATE inventory 
+            SET quantity = $1 
+            WHERE id = $2 
+            RETURNING *;
+        `;
 
-    if (index !== -1) {
-        // 找到的話，用展開運算子合併新舊資料，並鎖死 ID
-        inventory[index] = { ...inventory[index], ...updatedData, id: itemId };
+        const result = await pool.query(updateQuery, [quantity, itemId]);
+
+        // 如果資料庫回傳的 rows 長度為 0，代表找不到這個 ID
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: '倉庫中找不到該 ID 的麵粉' });
+        }
+
         res.status(200).json({
-            message: `成功更新 ID ${itemId} 的資料`,
-            data: inventory[index]
+            message: '成功修改資料庫庫存！',
+            data: result.rows[0] // 把更新後的完整資料交給前端
         });
-    } else {
-        res.status(404).json({ message: '找不到該庫存項目' });
+
+    } catch (error) {
+        console.error('更新資料失敗：', error);
+        res.status(500).json({ message: '伺服器內部發生錯誤' });
     }
 });
 
 // ==========================================
-// 4. [DELETE] 刪除指定 ID 的麵粉
+// 4. [DELETE] 刪除特定麵粉資料 (Day 2 真實資料庫版)
 // ==========================================
-app.delete('/api/inventory/:id', (req, res) => {
-    const itemId = parseInt(req.params.id);
-    const initialLength = inventory.length; // 記下原本的長度
-    
-    // 用 .filter() 留下「不是這個 ID」的麵粉，重新指派給變數
-    inventory = inventory.filter(item => item.id !== itemId);
+app.delete('/api/inventory/:id', async (req, res) => {
+    try {
+        const itemId = parseInt(req.params.id);
 
-    // 比對長度，確認有沒有刪除成功
-    if (inventory.length < initialLength) {
-        res.status(200).json({ message: `成功刪除 ID ${itemId} 的項目` });
-    } else {
-        res.status(404).json({ message: '找不到該庫存項目' });
+        // 🔑 關鍵：使用 WHERE id = $1 鎖定目標，否則會清空整張表！
+        const deleteQuery = 'DELETE FROM inventory WHERE id = $1 RETURNING *;';
+        const result = await pool.query(deleteQuery, [itemId]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: '找不到該項目，無法刪除' });
+        }
+
+        res.status(200).json({ 
+            message: `成功從資料庫刪除 ID ${itemId} 的麵粉項目` 
+        });
+
+    } catch (error) {
+        console.error('刪除資料失敗：', error);
+        res.status(500).json({ message: '伺服器內部發生錯誤' });
     }
 });
 
 // 啟動伺服器並監聽 3000 連線埠
 app.listen(PORT, () => {
     console.log(`伺服器已啟動！請打開 http://localhost:${PORT}/api/inventory`);
+});
+
+// 啟動伺服器並測試資料庫連線
+app.listen(PORT, async () => {
+    console.log(`伺服器已啟動！請打開 http://localhost:${PORT}`);
+    
+    try {
+        // 去資料庫執行一個最簡單的 SQL 指令：SELECT NOW() (取得現在時間)
+        const res = await pool.query('SELECT NOW()');
+        console.log('✅ 資料庫連線成功！資料庫時間：', res.rows[0].now);
+    } catch (error) {
+        console.error('❌ 資料庫連線失敗：', error.message);
+    }
 });
