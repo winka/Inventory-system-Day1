@@ -72,37 +72,52 @@ app.post('/api/inventory', async (req, res) => {
     }
 });
 
-// ==========================================
-// 3. [PUT] 修改指定 ID 的麵粉資料
-// ==========================================
-app.put('/api/inventory/:id', async (req, res) => {
-    try {
-        const itemId = parseInt(req.params.id);
-        const { quantity } = req.body;
 
-        // 🔑 關鍵：使用 WHERE id = $2 鎖定目標，避免全表更新
+// 3. [PUT] 修改特定麵粉數量並記錄日誌
+app.put('/api/inventory/:id', async (req, res) => {
+    const itemId = parseInt(req.params.id);
+    const { quantity } = req.body;
+    
+    // 🔑 從連線池裡「獨佔」借用一個警衛，來處理這筆連續交易
+    const client = await pool.connect(); 
+
+    try {
+        await client.query('BEGIN'); // 宣告交易開始！
+
+        // 動作一：更新原本的庫存表
         const updateQuery = `
             UPDATE inventory 
             SET quantity = $1 
             WHERE id = $2 
             RETURNING *;
         `;
+        const updateResult = await client.query(updateQuery, [quantity, itemId]);
 
-        const result = await pool.query(updateQuery, [quantity, itemId]);
-
-        // 如果資料庫回傳的 rows 長度為 0，代表找不到這個 ID
-        if (result.rows.length === 0) {
+        if (updateResult.rows.length === 0) {
+            await client.query('ROLLBACK'); // 找不到麵粉，馬上撤銷交易
             return res.status(404).json({ message: '倉庫中找不到該 ID 的麵粉' });
         }
 
+        // 動作二：寫入日誌表
+        const logQuery = `
+            INSERT INTO inventory_logs (inventory_id, new_quantity)
+            VALUES ($1, $2);
+        `;
+        await client.query(logQuery, [itemId, quantity]);
+
+        await client.query('COMMIT'); // 兩項動作皆順利完成，正式存檔！
+
         res.status(200).json({
-            message: '成功修改資料庫庫存！',
-            data: result.rows[0] // 把更新後的完整資料交給前端
+            message: '成功修改庫存，並已將異動記錄至系統日誌！',
+            data: updateResult.rows[0] 
         });
 
     } catch (error) {
-        console.error('更新資料失敗：', error);
+        await client.query('ROLLBACK'); // 發生任何預期外的錯誤，立刻還原保護資料
+        console.error('更新資料與日誌失敗：', error);
         res.status(500).json({ message: '伺服器內部發生錯誤' });
+    } finally {
+        client.release(); // 🔑 交易結束，讓警衛歸隊，釋放資源
     }
 });
 
