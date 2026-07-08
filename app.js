@@ -42,25 +42,40 @@ app.get('/api/inventory', async (req, res) => {
 // ==========================================
 // 2. [POST] 新增一筆麵粉資料
 // ==========================================
+// ==========================================
+// 2. [POST] 新增一筆麵粉資料 (Day 4 嚴格驗證版)
+// ==========================================
 app.post('/api/inventory', async (req, res) => {
-    try {
-        // 1. 打開包裹，拿出裡面的麵粉資訊
-        const { name, quantity, unit } = req.body;
+    // 1. 打開包裹
+    const { name, quantity, unit } = req.body;
 
-        // 2. 準備 SQL 新增語法 (注意 VALUES 裡面的 $1, $2, $3)
+    // 🛡️ 防衛戰第一線：資料驗證 (Validation) 區塊 
+    // 規則 1: 檢查名稱是否存在，且去掉頭尾空白後不能是空的
+    if (!name || name.trim() === '') {
+        return res.status(400).json({ message: '資料驗證失敗：麵粉名稱不能為空白！' });
+    }
+
+    // 規則 2: 檢查數量是否為數字，且不能小於 0
+    if (typeof quantity !== 'number' || quantity < 0) {
+        return res.status(400).json({ message: '資料驗證失敗：數量必須是數字，且不能為負數！' });
+    }
+
+    // 規則 3: 檢查單位
+    if (!unit || unit.trim() === '') {
+        return res.status(400).json({ message: '資料驗證失敗：包裝單位不能為空白！' });
+    }
+    // 🛡️ 防衛戰結束。如果程式能走到這裡，代表資料 100% 乾淨安全！
+
+    try {
+        // 以下是原本 Day 2 寫好的資料庫新增邏輯
         const insertQuery = `
             INSERT INTO inventory (name, quantity, unit) 
             VALUES ($1, $2, $3) 
             RETURNING *;
         `;
-        
-        // 3. 把實際要填入的資料打包成陣列
         const values = [name, quantity, unit];
-
-        // 4. 派警衛把「語法」和「資料」分開帶去資料庫執行
         const result = await pool.query(insertQuery, values);
 
-        // 5. 回傳成功訊息，並把資料庫剛剛建好的那筆資料印出來
         res.status(201).json({
             message: '成功將新麵粉存入資料庫！',
             data: result.rows[0] 
