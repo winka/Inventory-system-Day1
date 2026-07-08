@@ -39,12 +39,38 @@ app.get('/api/inventory', async (req, res) => {
         res.status(500).json({ message: '伺服器內部發生錯誤' });
     }
 });
-// ==========================================
+
+app.get('/api/reports/history', async (req, res) => {
+    try {
+        // 🔑 這是後端工程師的靈魂：撰寫 JOIN SQL 語法
+        // AS 是幫表格取短的小名 (Alias)，這樣下面寫起來比較簡潔
+        const reportQuery = `
+            SELECT 
+                logs.id AS 日誌編號,
+                inv.name AS 麵粉名稱,
+                logs.new_quantity AS 變更後數量,
+                logs.updated_at AS 異動時間
+            FROM inventory_logs AS logs
+            INNER JOIN inventory AS inv 
+                ON logs.inventory_id = inv.id
+            ORDER BY logs.updated_at DESC; 
+        `;
+        // (ORDER BY ... DESC 代表用時間「由新到舊」排序，最新的紀錄在最上面)
+
+        const result = await pool.query(reportQuery);
+
+        res.status(200).json({
+            message: '成功產出庫存異動歷史報表！',
+            total_records: result.rows.length,
+            data: result.rows
+        });
+
+    } catch (error) {
+        console.error('產出報表失敗：', error);
+        res.status(500).json({ message: '伺服器內部發生錯誤' });
+    }
+});
 // 2. [POST] 新增一筆麵粉資料
-// ==========================================
-// ==========================================
-// 2. [POST] 新增一筆麵粉資料 (Day 4 嚴格驗證版)
-// ==========================================
 app.post('/api/inventory', async (req, res) => {
     // 1. 打開包裹
     const { name, quantity, unit } = req.body;
